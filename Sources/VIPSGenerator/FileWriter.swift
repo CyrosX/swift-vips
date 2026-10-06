@@ -18,37 +18,87 @@ struct FileWriter {
     /// - Parameters:
     ///   - category: The category name (e.g., "Arithmetic", "Foreign/JPEG")
     ///   - methods: Array of tuples with nickname and generated code
-    func writeCategory(_ category: String, methods: [(nickname: String, code: String)]) throws {
-        // Determine file path based on category
+    func writeCategory(
+        _ category: String,
+        methods: [(nickname: String, code: String)]
+    ) throws {
         let (filepath, filename) = getFilePath(for: category)
 
-        // Ensure directory exists
-        let directory = filepath.deletingLastPathComponent()
-        try ensureDirectoryExists(directory)
+        try ensureDirectoryExists(filepath.deletingLastPathComponent())
 
-        // Check if any operations need CvipsShim import
         let needsCvipsShim = checkNeedsCvipsShim(methods: methods)
 
-        // Separate operations into static and instance methods
+        let content =
+            generateHeader(
+                filename: filename,
+                needsCvipsShim: needsCvipsShim
+            )
+            + categoryContents(category, methods: methods)
+
+        try content.write(to: filepath, atomically: true, encoding: .utf8)
+    }
+    func writeCombined(
+        to outputFile: URL,
+        categories: [String: [(nickname: String, code: String)]],
+        enumFiles: [(name: String, code: String)]
+    ) throws {
+        try ensureDirectoryExists(outputFile.deletingLastPathComponent())
+
+        let allMethods = categories.values.flatMap { $0 }
+        let needsCvipsShim = checkNeedsCvipsShim(methods: allMethods)
+
+        var sections: [String] = []
+
+        for category in categories.keys.sorted() {
+            guard let methods = categories[category] else {
+                continue
+            }
+
+            let section = categoryContents(category, methods: methods)
+
+            if !section.isEmpty {
+                sections.append(section)
+            }
+        }
+
+        for enumFile in enumFiles.sorted(by: { $0.name < $1.name }) {
+            sections.append(enumFile.code)
+        }
+
+        let content =
+            generateHeader(
+                filename: outputFile.lastPathComponent,
+                needsCvipsShim: needsCvipsShim
+            )
+            + sections.joined(separator: "\n\n")
+
+        try content.write(
+            to: outputFile,
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+    private func categoryContents(
+        _ category: String,
+        methods: [(nickname: String, code: String)]
+    ) -> String {
         let (staticMethods, instanceMethods) = separateMethods(methods)
 
-        // Generate file content
-        let header = generateHeader(filename: filename, needsCvipsShim: needsCvipsShim)
-        var content = header
+        var content = ""
 
-        // Write instance methods
         if !instanceMethods.isEmpty {
-            content += "extension VIPSImageProtocol where Self: ~Copyable /*, Self: ~Escapable */ {\n\n"
+            content +=
+                "extension VIPSImageProtocol where Self: ~Copyable /*, Self: ~Escapable */ {\n\n"
 
             for (_, code) in instanceMethods {
                 content += code
                 content += "\n\n"
             }
 
-            // Add convenience methods for relational operations in the arithmetic category
             if category == "Arithmetic" {
                 let overloads = OverloadGenerators()
                 let relationalMethods = overloads.generateRelationalConvenienceMethods()
+
                 if !relationalMethods.isEmpty {
                     content += relationalMethods
                     content += "\n\n"
@@ -58,12 +108,13 @@ struct FileWriter {
             content += "}\n"
         }
 
-        // Write static methods
         if !staticMethods.isEmpty {
             if !instanceMethods.isEmpty {
                 content += "\n"
             }
-            content += "extension VIPSImageProtocol where Self: ~Copyable /*, Self: ~Escapable */ {\n\n"
+
+            content +=
+                "extension VIPSImageProtocol where Self: ~Copyable /*, Self: ~Escapable */ {\n\n"
 
             for (_, code) in staticMethods {
                 content += code
@@ -73,8 +124,7 @@ struct FileWriter {
             content += "}\n"
         }
 
-        // Write to file
-        try content.write(to: filepath, atomically: true, encoding: .utf8)
+        return content
     }
 
     /// Generate the file header
@@ -140,8 +190,17 @@ struct FileWriter {
     /// Write a single enum extension file.
     func writeEnum(name: String, code: String) throws {
         let filepath = getEnumFilePath(for: name)
+
         try ensureDirectoryExists(filepath.deletingLastPathComponent())
-        try code.write(to: filepath, atomically: true, encoding: .utf8)
+
+        let content =
+            generateHeader(
+                filename: filepath.lastPathComponent,
+                needsCvipsShim: false
+            )
+            + code
+
+        try content.write(to: filepath, atomically: true, encoding: .utf8)
     }
 
     /// Check if any methods need CvipsShim import

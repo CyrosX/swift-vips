@@ -13,6 +13,7 @@ import Subprocess
 
 struct Arguments {
     var outputDir: String = "Sources/VIPS/Generated"
+    var outputFile: String? = nil
     var dryRun: Bool = false
     var verbose: Bool = false
     var operation: String? = nil
@@ -33,6 +34,15 @@ func parseArguments() -> Arguments {
             if i < commandLineArgs.count {
                 args.outputDir = commandLineArgs[i]
             }
+        case "--output-file":
+            i += 1
+
+            guard i < commandLineArgs.count else {
+                print("Error: --output-file requires a path")
+                exit(1)
+            }
+
+            args.outputFile = commandLineArgs[i]
         case "--dry-run":
             args.dryRun = true
         case "--verbose":
@@ -69,6 +79,7 @@ func printHelp() {
 
     Options:
         --output-dir, -o <path>    Output directory (default: Sources/VIPS/Generated)
+        --output-file <path>          Write all generated Swift code to one file
         --dry-run                  Print what would be generated without writing
         --verbose                  Print progress information
         --operation <name>         Generate single operation (for testing)
@@ -112,6 +123,42 @@ func formatGeneratedFiles(outputDirectory: String, verbose: Bool) async {
         }
     } catch {
         // swift format might not be available in older toolchains
+        if verbose {
+            print("  ⚠️  Failed to run swift format: \(error)")
+            print("  ℹ️  Formatting requires Swift 6.0 or later")
+        }
+    }
+}
+
+func formatGeneratedFile(outputFile: String, verbose: Bool) async {
+    do {
+        let result = try await run(
+            .name("swift"),
+            arguments: [
+                "format",
+                "--in-place",
+                outputFile,
+            ],
+            output: .discarded,
+            error: .string(limit: 16_384)
+        )
+
+        if result.terminationStatus.isSuccess {
+            if verbose {
+                print("  ✅ Formatted generated file")
+            }
+        } else {
+            print("  ⚠️  swift format exited with status \(result.terminationStatus)")
+
+            if let stderr = result.standardError, !stderr.isEmpty {
+                print("  Error output:")
+
+                for line in stderr.split(separator: "\n") {
+                    print("    \(line)")
+                }
+            }
+        }
+    } catch {
         if verbose {
             print("  ⚠️  Failed to run swift format: \(error)")
             print("  ℹ️  Formatting requires Swift 6.0 or later")
@@ -260,15 +307,22 @@ func main() async {
 
         // If --list-outputs, just print the file paths and exit
         if args.listOutputs {
-            let writer = FileWriter(outputDirectory: args.outputDir)
-            for category in categorizedMethods.keys.sorted() {
-                let (filepath, _) = writer.getFilePath(for: category)
-                print(filepath.path())
+            if let outputFile = args.outputFile {
+                print(URL(fileURLWithPath: outputFile).path)
+            } else {
+                let writer = FileWriter(outputDirectory: args.outputDir)
+
+                for category in categorizedMethods.keys.sorted() {
+                    let (filepath, _) = writer.getFilePath(for: category)
+                    print(filepath.path())
+                }
+
+                for enumFile in enumFiles {
+                    let path = writer.getEnumFilePath(for: enumFile.name)
+                    print(path.path())
+                }
             }
-            for enumFile in enumFiles {
-                let path = writer.getEnumFilePath(for: enumFile.name)
-                print(path.path())
-            }
+
             return
         }
 
@@ -278,26 +332,57 @@ func main() async {
         }
 
         let writer = FileWriter(outputDirectory: args.outputDir)
-        for category in categorizedMethods.keys.sorted() {
-            let methods = categorizedMethods[category]!
-            try writer.writeCategory(category, methods: methods)
-            print("  ✅ Generated \(category.lowercased().replacingOccurrences(of: "/", with: "_")).generated.swift (\(methods.count) operations)")
-        }
 
-        for enumFile in enumFiles {
-            try writer.writeEnum(name: enumFile.name, code: enumFile.code)
-        }
-        if !enumFiles.isEmpty {
-            print("  ✅ Generated \(enumFiles.count) enum extensions")
-        }
+        if let outputFile = args.outputFile {
+            let outputURL = URL(fileURLWithPath: outputFile)
 
-        print("\nGeneration complete!")
+            try writer.writeCombined(
+                to: outputURL,
+                categories: categorizedMethods,
+                enumFiles: enumFiles
+            )
 
-        // Format generated files with swift format
-        if args.verbose {
-            print("\nFormatting generated files...")
+            print("  ✅ Generated \(outputURL.lastPathComponent)")
+            print("\nGeneration complete!")
+
+            if args.verbose {
+                print("\nFormatting generated file...")
+            }
+
+            await formatGeneratedFile(
+                outputFile: outputURL.path,
+                verbose: args.verbose
+            )
+        } else {
+            for category in categorizedMethods.keys.sorted() {
+                let methods = categorizedMethods[category]!
+
+                try writer.writeCategory(category, methods: methods)
+
+                print(
+                    "  ✅ Generated \(category.lowercased().replacingOccurrences(of: "/", with: "_")).generated.swift (\(methods.count) operations)"
+                )
+            }
+
+            for enumFile in enumFiles {
+                try writer.writeEnum(name: enumFile.name, code: enumFile.code)
+            }
+
+            if !enumFiles.isEmpty {
+                print("  ✅ Generated \(enumFiles.count) enum extensions")
+            }
+
+            print("\nGeneration complete!")
+
+            if args.verbose {
+                print("\nFormatting generated files...")
+            }
+
+            await formatGeneratedFiles(
+                outputDirectory: args.outputDir,
+                verbose: args.verbose
+            )
         }
-        await formatGeneratedFiles(outputDirectory: args.outputDir, verbose: args.verbose)
 
         print("\nSummary:")
         let totalOperations = categorizedMethods.values.reduce(0) { $0 + $1.count }
